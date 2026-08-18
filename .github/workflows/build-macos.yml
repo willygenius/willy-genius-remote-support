@@ -1,0 +1,38 @@
+name: Build macOS Remote Support Package
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare installer files
+        run: |
+          chmod +x scripts/postinstall
+          mkdir -p pkgroot
+
+      - name: Build PKG
+        run: |
+          pkgbuild \
+            --root pkgroot \
+            --scripts scripts \
+            --identifier com.willygenius.remotesupport \
+            --version 1.0.0 \
+            --install-location / \
+            WillyGenius-Remote-Support.pkg
+
+      - name: Inspect package
+        run: |
+          pkgutil --check-signature WillyGenius-Remote-Support.pkg || true
+          pkgutil --payload-files WillyGenius-Remote-Support.pkg || true
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: WillyGenius-Remote-Support-macOS
+          path: WillyGenius-Remote-Support.pkg

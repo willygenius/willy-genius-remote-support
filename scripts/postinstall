@@ -1,0 +1,84 @@
+#!/bin/bash
+
+set -e
+
+SERVER="remote.willygenius.com"
+KEY="WMRmSr59xrxxOKXnHDNMPv+L2PC6Ji8K3+sxZJ3emR8="
+
+echo "Willy Genius Remote Support"
+echo "Installing RustDesk..."
+
+WORK_DIR="/tmp/willygenius-rustdesk"
+
+rm -rf "$WORK_DIR"
+mkdir -p "$WORK_DIR"
+cd "$WORK_DIR"
+
+ARCH="$(uname -m)"
+
+if [ "$ARCH" = "arm64" ]; then
+    echo "Detected Apple Silicon"
+
+    RD_LINK=$(curl -sL https://github.com/rustdesk/rustdesk/releases/latest \
+        | grep -Eo 'https://[^"]+/rustdesk[^"]+aarch64\.dmg' \
+        | head -n 1)
+else
+    echo "Detected Intel Mac"
+
+    RD_LINK=$(curl -sL https://github.com/rustdesk/rustdesk/releases/latest \
+        | grep -Eo 'https://[^"]+/rustdesk[^"]+x86_64\.dmg' \
+        | head -n 1)
+fi
+
+if [ -z "$RD_LINK" ]; then
+    echo "Unable to locate RustDesk download."
+    exit 1
+fi
+
+DMG="$WORK_DIR/RustDesk.dmg"
+
+echo "Downloading RustDesk..."
+curl -L "$RD_LINK" -o "$DMG"
+
+MOUNT_POINT="$WORK_DIR/mount"
+mkdir -p "$MOUNT_POINT"
+
+echo "Mounting installer..."
+hdiutil attach "$DMG" \
+    -mountpoint "$MOUNT_POINT" \
+    -nobrowse \
+    -quiet
+
+echo "Installing RustDesk..."
+
+rm -rf /Applications/RustDesk.app
+ditto "$MOUNT_POINT/RustDesk.app" /Applications/RustDesk.app
+
+hdiutil detach "$MOUNT_POINT" -quiet
+
+RUSTDESK="/Applications/RustDesk.app/Contents/MacOS/RustDesk"
+
+if [ ! -x "$RUSTDESK" ]; then
+    echo "RustDesk application was not installed correctly."
+    exit 1
+fi
+
+echo "Applying Willy Genius Remote Support configuration..."
+
+"$RUSTDESK" --config \
+"rendezvous_server = '${SERVER}:21116'
+
+[options]
+key = '${KEY}'
+custom-rendezvous-server = '${SERVER}'
+relay-server = '${SERVER}'" || true
+
+echo "Opening RustDesk..."
+
+open -a RustDesk || true
+
+rm -rf "$WORK_DIR"
+
+echo "Willy Genius Remote Support installation complete."
+
+exit 0
