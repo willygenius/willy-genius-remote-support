@@ -1,0 +1,97 @@
+name: Build Android RustDesk
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-24.04
+
+    defaults:
+      run:
+        working-directory: rustdesk
+
+    env:
+      RUST_VERSION: "1.75"
+      FLUTTER_VERSION: "3.24.5"
+      CARGO_NDK_VERSION: "3.1.2"
+      NDK_VERSION: "r28c"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            curl \
+            gcc \
+            git \
+            libclang-dev \
+            llvm \
+            nasm \
+            ninja-build \
+            pkg-config \
+            python3 \
+            unzip \
+            wget \
+            yasm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.75"
+          targets: aarch64-linux-android
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: stable
+          cache: true
+
+      - name: Install cargo-ndk
+        run: |
+          cargo install cargo-ndk --version 3.1.2
+
+      - name: Configure Android
+        run: |
+          yes | flutter doctor --android-licenses || true
+          flutter doctor -v
+
+      - name: Fetch Flutter packages
+        run: |
+          cd flutter
+          flutter pub get
+
+      - name: Build Android ARM64 APK
+        run: |
+          chmod +x flutter/build_android.sh
+          ./flutter/build_android.sh aarch64
+
+      - name: Find APK
+        run: |
+          find . -type f -name "*.apk" -print
+
+      - name: Collect APK
+        run: |
+          mkdir -p ../android-output
+          APK="$(find . -type f -name "*.apk" | head -n 1)"
+
+          if [ -z "$APK" ]; then
+            echo "No APK was produced"
+            exit 1
+          fi
+
+          cp "$APK" ../android-output/WillyGenius-Remote-Support-Android.apk
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: WillyGenius-Remote-Support-Android
+          path: android-output/WillyGenius-Remote-Support-Android.apk
