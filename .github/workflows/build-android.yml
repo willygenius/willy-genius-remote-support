@@ -92,8 +92,14 @@ jobs:
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           rustup target add aarch64-linux-android
-          chmod +x ./flutter/ndk_arm64.sh
-          ./flutter/ndk_arm64.sh
+
+          cargo ndk \
+            --platform 21 \
+            --target aarch64-linux-android \
+            build \
+            --locked \
+            --release \
+            --features flutter
 
           mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
 
