@@ -3,37 +3,87 @@ name: Build Android RustDesk
 on:
   workflow_dispatch:
 
+env:
+  RUST_VERSION: "1.75"
+  CARGO_NDK_VERSION: "3.1.2"
+  ANDROID_FLUTTER_VERSION: "3.24.5"
+  NDK_VERSION: "r28c"
+
+  # RustDesk's pinned vcpkg revision
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+
+  # GitHub Actions vcpkg binary cache
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
 jobs:
   build-android:
+    name: Build Willy Genius Android ARM64
     runs-on: ubuntu-24.04
 
     defaults:
       run:
         working-directory: rustdesk
 
-    env:
-      RUST_VERSION: "1.75"
-      FLUTTER_VERSION: "3.24.5"
-      CARGO_NDK_VERSION: "3.1.2"
-      NDK_VERSION: "r28c"
-
     steps:
+
+      # ------------------------------------------------------------
+      # FREE DISK SPACE
+      # ------------------------------------------------------------
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      # ------------------------------------------------------------
+      # GITHUB ACTIONS CACHE ENVIRONMENT
+      # ------------------------------------------------------------
+
+      - name: Export GitHub Actions cache variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable(
+              'ACTIONS_CACHE_URL',
+              process.env.ACTIONS_CACHE_URL || ''
+            );
+
+            core.exportVariable(
+              'ACTIONS_RUNTIME_TOKEN',
+              process.env.ACTIONS_RUNTIME_TOKEN || ''
+            );
+
+      # ------------------------------------------------------------
+      # CHECKOUT
+      # ------------------------------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install dependencies
+      # ------------------------------------------------------------
+      # SYSTEM DEPENDENCIES
+      # ------------------------------------------------------------
+
+      - name: Install Linux dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
             clang \
             cmake \
             curl \
             gcc-multilib \
+            git \
             g++ \
             g++-multilib \
-            git \
             libayatana-appindicator3-dev \
             libasound2-dev \
             libc6-dev \
@@ -55,13 +105,43 @@ jobs:
             openjdk-17-jdk-headless \
             pkg-config \
             tree \
-            wget
+            wget \
+            unzip \
+            zip
+
+      # ------------------------------------------------------------
+      # FLUTTER
+      # ------------------------------------------------------------
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.24.5"
           channel: stable
+          flutter-version: "3.24.5"
+          cache: true
+
+      - name: Patch Flutter
+        shell: bash
+        run: |
+          FLUTTER_ROOT="$(dirname "$(dirname "$(which flutter)")")"
+
+          echo "Flutter root:"
+          echo "$FLUTTER_ROOT"
+
+          cd "$FLUTTER_ROOT"
+
+          git apply \
+            "${{ github.workspace }}/rustdesk/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff" \
+            || true
+
+      - name: Show Flutter version
+        run: |
+          flutter --version
+          flutter doctor -v
+
+      # ------------------------------------------------------------
+      # ANDROID NDK
+      # ------------------------------------------------------------
 
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
@@ -70,7 +150,107 @@ jobs:
           ndk-version: r28c
           add-to-path: true
 
-      - name: Install Rust
+      - name: Show Android environment
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
+
+          ls -la "$ANDROID_NDK_HOME"
+
+      # ------------------------------------------------------------
+      # VCPKG
+      # ------------------------------------------------------------
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: "120deac3062162151622ca4860575a33844ba10b"
+          doNotCache: false
+
+      - name: Show vcpkg information
+        run: |
+          echo "VCPKG_ROOT=$VCPKG_ROOT"
+
+          "$VCPKG_ROOT/vcpkg" version
+
+          git -C "$VCPKG_ROOT" rev-parse HEAD
+
+      # ------------------------------------------------------------
+      # IMPORTANT:
+      # USE RUSTDESK'S OWN ANDROID DEPENDENCY BUILDER
+      # ------------------------------------------------------------
+
+      - name: Install RustDesk Android native dependencies
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -e
+
+          chmod +x ./flutter/build_android_deps.sh
+
+          echo "Installing RustDesk dependencies for ARM64 Android..."
+          echo "Target: arm64-v8a"
+          echo "VCPKG_ROOT=$VCPKG_ROOT"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+
+          if ! ./flutter/build_android_deps.sh arm64-v8a; then
+
+            echo
+            echo "=============================="
+            echo "VCPKG BUILD LOGS"
+            echo "=============================="
+
+            find "${VCPKG_ROOT}" -name "*.log" | while read -r logfile
+            do
+              echo
+              echo "----- $logfile -----"
+              tail -n 200 "$logfile" || true
+            done
+
+            exit 1
+          fi
+
+      - name: Verify native dependencies
+        run: |
+          echo "Installed ARM64 Android libraries:"
+
+          find "$VCPKG_ROOT/installed/arm64-android" \
+            -maxdepth 3 \
+            -type f \
+            \( \
+              -name "*vpx*" \
+              -o -name "*opus*" \
+              -o -name "*yuv*" \
+              -o -name "*aom*" \
+            \) \
+            -print || true
+
+          echo
+          echo "VPX headers:"
+          find "$VCPKG_ROOT/installed/arm64-android/include" \
+            -path "*vpx*" \
+            -type f \
+            | head -30 || true
+
+          echo
+          echo "Opus headers:"
+          find "$VCPKG_ROOT/installed/arm64-android/include" \
+            -path "*opus*" \
+            -type f \
+            | head -30 || true
+
+      # ------------------------------------------------------------
+      # RUST
+      # ------------------------------------------------------------
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.75"
@@ -79,45 +259,110 @@ jobs:
 
       - name: Install cargo-ndk
         run: |
-          cargo install cargo-ndk --version 3.1.2 --locked
+          cargo install \
+            cargo-ndk \
+            --version 3.1.2 \
+            --locked
+
+      - name: Show Rust versions
+        run: |
+          rustc --version
+          cargo --version
+          rustup target list --installed
+          cargo ndk --version
+
+      # ------------------------------------------------------------
+      # FLUTTER DEPENDENCIES
+      # ------------------------------------------------------------
 
       - name: Fetch Flutter packages
         run: |
           cd flutter
           flutter pub get
 
+      # ------------------------------------------------------------
+      # BUILD RUSTDESK NATIVE LIBRARY
+      # ------------------------------------------------------------
+
       - name: Build RustDesk ARM64 library
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
         run: |
+          set -e
+
           rustup target add aarch64-linux-android
 
-          cargo ndk \
-            --platform 21 \
-            --target aarch64-linux-android \
-            build \
-            --locked \
-            --release \
-            --features flutter
+          chmod +x ./flutter/ndk_arm64.sh
 
-          mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
+          echo "Building RustDesk ARM64 native library..."
 
-          cp ./target/aarch64-linux-android/release/liblibrustdesk.so \
-             ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+          ./flutter/ndk_arm64.sh
 
-          cp "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
-             ./flutter/android/app/src/main/jniLibs/arm64-v8a/
+          echo
+          echo "Native library built:"
 
-      - name: Build Android APK
+          ls -lh \
+            ./target/aarch64-linux-android/release/liblibrustdesk.so
+
+      # ------------------------------------------------------------
+      # PREPARE JNI LIBRARIES
+      # ------------------------------------------------------------
+
+      - name: Prepare Android JNI libraries
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -e
+
+          JNI_DIR="./flutter/android/app/src/main/jniLibs/arm64-v8a"
+
+          mkdir -p "$JNI_DIR"
+
+          cp \
+            ./target/aarch64-linux-android/release/liblibrustdesk.so \
+            "$JNI_DIR/librustdesk.so"
+
+          cp \
+            "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+            "$JNI_DIR/libc++_shared.so"
+
+          echo
+          echo "JNI libraries:"
+
+          ls -lh "$JNI_DIR"
+
+      # ------------------------------------------------------------
+      # CONFIGURE ANDROID BUILD
+      # ------------------------------------------------------------
+
+      - name: Configure Android release build
+        run: |
+          # Give Gradle more memory.
+          sed -i \
+            "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" \
+            ./flutter/android/gradle.properties
+
+          # We do not have RustDesk's official release signing certificate,
+          # so use the debug signing configuration for this test build.
+          sed -i \
+            "s/signingConfigs.release/signingConfigs.debug/g" \
+            ./flutter/android/app/build.gradle
+
+      # ------------------------------------------------------------
+      # BUILD APK
+      # ------------------------------------------------------------
+
+      - name: Build Android ARM64 APK
+        shell: bash
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
         run: |
-          export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
+          set -e
 
-          sed -i "s/signingConfigs.release/signingConfigs.debug/g" \
-            ./flutter/android/app/build.gradle
+          export PATH="$JAVA_HOME/bin:$PATH"
+
+          java -version
 
           cd flutter
 
@@ -126,15 +371,49 @@ jobs:
             --target-platform android-arm64 \
             --split-per-abi
 
+          echo
+          echo "Flutter APK output:"
+
+          ls -lh build/app/outputs/flutter-apk/
+
+      # ------------------------------------------------------------
+      # COLLECT RESULT
+      # ------------------------------------------------------------
+
       - name: Collect APK
         run: |
+          set -e
+
           mkdir -p ../android-output
 
-          cp ./flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
-             ../android-output/WillyGenius-Remote-Support-Android.apk
+          SOURCE_APK="./flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk"
+
+          if [ ! -f "$SOURCE_APK" ]; then
+            echo "ERROR: APK was not produced."
+            echo
+            find ./flutter/build -type f -name "*.apk" -print || true
+            exit 1
+          fi
+
+          cp \
+            "$SOURCE_APK" \
+            ../android-output/WillyGenius-Remote-Support-Android.apk
+
+          echo
+          echo "Final APK:"
+          ls -lh \
+            ../android-output/WillyGenius-Remote-Support-Android.apk
+
+          sha256sum \
+            ../android-output/WillyGenius-Remote-Support-Android.apk
+
+      # ------------------------------------------------------------
+      # UPLOAD
+      # ------------------------------------------------------------
 
       - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
           name: WillyGenius-Remote-Support-Android
           path: android-output/WillyGenius-Remote-Support-Android.apk
+          if-no-files-found: error
